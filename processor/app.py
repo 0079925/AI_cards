@@ -40,6 +40,13 @@ def parse_json(raw: str) -> dict:
     return {}
 
 
+def is_valid_email(value: str) -> bool:
+    if not value:
+        return False
+    # Pragmatic validation for CRM routing; strict RFC parsing is not required here.
+    return re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value.strip()) is not None
+
+
 def guess_mime(filename: str, fallback: str) -> str:
     low = (filename or "").lower()
     if low.endswith(".jpg") or low.endswith(".jpeg"):
@@ -75,7 +82,8 @@ async def zammad_ticket(
 
     company = lead.get("company") or "?"
     name    = lead.get("name")    or "?"
-    customer = lead.get("email") or FALLBACK_EMAIL
+    raw_email = (lead.get("email") or "").strip()
+    customer = raw_email if is_valid_email(raw_email) else FALLBACK_EMAIL
 
     payload = {
         "title": f"Лид: {company} / {name}",
