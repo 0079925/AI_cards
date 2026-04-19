@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Лид — захват</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:#111;color:#fff;font-family:"Segoe UI",system-ui,sans-serif;overflow:hidden}
+body{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;padding:20px}
+.logo{font-size:13px;color:#555;letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px}
+.btn{width:100%;max-width:400px;height:130px;border:none;border-radius:24px;font-size:22px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:14px;transition:transform .1s,opacity .1s;-webkit-user-select:none;user-select:none}
+.btn:active{transform:scale(.96);opacity:.85}
+.btn-card{background:linear-gradient(135deg,#0d9488,#0f766e);color:#fff}
+.btn-voice{background:linear-gradient(135deg,#ea580c,#b91c1c);color:#fff}
+.btn .ico{font-size:40px;line-height:1}
+.btn .lbl{text-align:left;line-height:1.3}
+.btn .lbl small{font-size:13px;font-weight:400;opacity:.75;display:block;margin-top:4px}
+#overlay{display:none;position:fixed;inset:0;background:#000c;flex-direction:column;align-items:center;justify-content:center;gap:16px;z-index:10;font-size:20px}
+#overlay.show{display:flex}
+.spinner{width:52px;height:52px;border:5px solid #333;border-top-color:#0d9488;border-radius:50%;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#recBar{display:none;width:100%;max-width:400px;background:#1a1a1a;border-radius:16px;padding:20px;text-align:center;border:2px solid #b91c1c}
+#recBar.show{display:block}
+#recTime{font-size:32px;font-weight:700;color:#f87171;font-variant-numeric:tabular-nums}
+#stopBtn{margin-top:14px;width:100%;padding:14px;border:none;border-radius:12px;background:#b91c1c;color:#fff;font-size:17px;font-weight:600;cursor:pointer}
+#toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#166534;color:#fff;padding:14px 28px;border-radius:16px;font-size:16px;font-weight:600;display:none;text-align:center;max-width:90%;box-shadow:0 4px 20px #0008}
+#toast.err{background:#7f1d1d}
+#toast.show{display:block;animation:pop .3s cubic-bezier(.34,1.56,.64,1)}
+@keyframes pop{from{transform:translateX(-50%) scale(.8);opacity:0}to{transform:translateX(-50%) scale(1);opacity:1}}
+#preview{display:none;width:100%;max-width:400px;border-radius:16px;overflow:hidden}
+#preview img{width:100%;display:block}
+#preview .send-row{display:flex;gap:10px;padding:10px;background:#1a1a1a}
+#preview .send-row button{flex:1;padding:14px;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer}
+#sendBtn{background:#0d9488;color:#fff}
+#cancelBtn{background:#333;color:#aaa}
+</style>
+</head>
+<body>
+<div class="logo">AAA-WB &middot; Захват лидов</div>
+<button class="btn btn-card" id="cardBtn">
+  <span class="ico">&#128248;</span>
+  <span class="lbl">ВИЗИТКА<small>Сфоткай — данные распознаются сами</small></span>
+</button>
+<button class="btn btn-voice" id="voiceBtn">
+  <span class="ico">&#127897;&#65039;</span>
+  <span class="lbl">ГОЛОС<small>Надиктуй имя, компанию, телефон</small></span>
+</button>
+<input type="file" id="cardFile" accept="image/*" capture="environment" style="display:none">
+<input type="file" id="voiceFile" accept="audio/*" capture style="display:none">
+<div id="recBar">
+  <div style="color:#f87171;font-size:13px;font-weight:600;letter-spacing:.05em">&#9679; ЗАПИСЬ</div>
+  <div id="recTime">0:00</div>
+  <button id="stopBtn">&#9209; СТОП &mdash; отправить</button>
+</div>
+<div id="preview">
+  <img id="previewImg" src="" alt="">
+  <div class="send-row">
+    <button id="sendBtn">&#10003; Отправить</button>
+    <button id="cancelBtn">&#215; Отмена</button>
+  </div>
+</div>
+<div id="overlay"><div class="spinner"></div><div id="overlayText">Обработка...</div></div>
+<div id="toast"></div>
+<script>
+const cardBtn=document.getElementById('cardBtn'),voiceBtn=document.getElementById('voiceBtn'),
+  cardFile=document.getElementById('cardFile'),recBar=document.getElementById('recBar'),
+  voiceFile=document.getElementById('voiceFile'),
+  recTime=document.getElementById('recTime'),stopBtn=document.getElementById('stopBtn'),
+  preview=document.getElementById('preview'),previewImg=document.getElementById('previewImg'),
+  sendBtn=document.getElementById('sendBtn'),cancelBtn=document.getElementById('cancelBtn'),
+  overlay=document.getElementById('overlay'),overlayTxt=document.getElementById('overlayText'),
+  toast=document.getElementById('toast');
+let mediaRec=null,audioChunks=[],recInterval=null,recSecs=0,cardFileData=null;
+function showOverlay(m){overlayTxt.textContent=m;overlay.classList.add('show')}
+function hideOverlay(){overlay.classList.remove('show')}
+function showToast(m,err=false){toast.textContent=m;toast.className='show'+(err?' err':'');setTimeout(()=>toast.className='',4500)}
+async function postFile(url,file,extra={}){
+  const fd=new FormData();fd.append('file',file);
+  for(const[k,v]of Object.entries(extra))fd.append(k,v);
+  const r=await fetch(url,{method:'POST',body:fd});
+  if(!r.ok)throw new Error('HTTP '+r.status+' — '+await r.text().catch(()=>''));
+  return r.json();
+}
+function hideBtns(){cardBtn.style.display='none';voiceBtn.style.display='none'}
+function showBtns(){cardBtn.style.display='';voiceBtn.style.display=''}
+cardBtn.addEventListener('click',()=>cardFile.click());
+cardFile.addEventListener('change',()=>{
+  const f=cardFile.files[0];if(!f)return;
+  cardFileData=f;previewImg.src=URL.createObjectURL(f);
+  preview.style.display='block';hideBtns();
+});
+sendBtn.addEventListener('click',async()=>{
+  if(!cardFileData)return;preview.style.display='none';
+  showOverlay('Распознаю визитку...');
+  try{
+    const data=await postFile('/webhook/card',cardFileData);
+    hideOverlay();const t=data.lead||{};
+    showToast('Тикет #'+data.ticket_id+'\n'+(t.name||'')+(t.company?' · '+t.company:''));
+  }catch(e){hideOverlay();showToast('Ошибка: '+e.message,true)}
+  finally{cardFileData=null;cardFile.value='';showBtns()}
+});
+cancelBtn.addEventListener('click',()=>{preview.style.display='none';cardFileData=null;cardFile.value='';showBtns()});
+voiceBtn.addEventListener('click',startRec);
+stopBtn.addEventListener('click',stopRec);
+voiceFile.addEventListener('change',async()=>{
+  const f=voiceFile.files[0];
+  if(!f)return;
+  showOverlay('Распознаю речь...');
+  try{
+    const data=await postFile('/webhook/voice',f);
+    hideOverlay();
+    const t=data.lead||{};
+    const nm=t.name||t.comment?.slice(0,30)||'—';
+    showToast('Тикет #'+data.ticket_id+'\n'+nm);
+  }catch(e){
+    hideOverlay();showToast('Ошибка: '+e.message,true);
+  }finally{
+    voiceFile.value='';
+  }
+});
+
+function canRecordInBrowser(){
+  return window.isSecureContext && !!navigator.mediaDevices &&
+    typeof navigator.mediaDevices.getUserMedia==='function' &&
+    typeof window.MediaRecorder!=='undefined';
+}
+
+async function submitVoiceFileFallback(){
+  showToast('Открою запись как файл. Для live-записи открой https://'+location.host,true);
+  voiceFile.click();
+}
+
+async function startRec(){
+  if(!canRecordInBrowser()){
+    return submitVoiceFileFallback();
+  }
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    audioChunks=[];recSecs=0;updateTimer();
+    recInterval=setInterval(()=>{recSecs++;updateTimer()},1000);
+    const mime=['audio/webm','audio/ogg','audio/mp4'].find(m=>MediaRecorder.isTypeSupported(m))||'';
+    mediaRec=new MediaRecorder(stream,mime?{mimeType:mime}:{});
+    mediaRec.ondataavailable=e=>{if(e.data.size>0)audioChunks.push(e.data)};
+    mediaRec.start(100);hideBtns();recBar.classList.add('show');
+  }catch(e){showToast('Нет доступа к микрофону: '+(e?.message||e),true)}
+}
+function updateTimer(){const m=Math.floor(recSecs/60),s=recSecs%60;recTime.textContent=m+':'+(s<10?'0':'')+s}
+async function stopRec(){
+  if(!mediaRec)return;clearInterval(recInterval);
+  mediaRec.stop();mediaRec.stream.getTracks().forEach(t=>t.stop());
+  mediaRec.onstop=async()=>{
+    recBar.classList.remove('show');showBtns();
+    const mime=audioChunks[0]?.type||'audio/webm';
+    const ext=mime.includes('ogg')?'ogg':mime.includes('mp4')?'mp4':'webm';
+    const blob=new Blob(audioChunks,{type:mime});
+    const file=new File([blob],'voice.'+ext,{type:mime});
+    showOverlay('Распознаю речь...');
+    try{
+      const data=await postFile('/webhook/voice',file);
+      hideOverlay();const t=data.lead||{};
+      const nm=t.name||t.comment?.slice(0,30)||'—';
+      showToast('Тикет #'+data.ticket_id+'\n'+nm);
+    }catch(e){hideOverlay();showToast('Ошибка: '+e.message,true)}
+  };
+}
+</script>
+</body>
+</html>

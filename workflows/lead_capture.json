@@ -1,0 +1,121 @@
+{
+  "name": "Lead Intake -> GPT -> Zammad",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake",
+        "responseMode": "responseNode",
+        "options": {
+          "binaryData": true
+        }
+      },
+      "id": "1",
+      "name": "Webhook Lead Intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [240, 280],
+      "webhookId": "lead-intake"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body || {};\nconst pick = (v) => (typeof v === 'string' ? v.trim() : '');\n\nconst lead = {\n  name: pick(body.name),\n  company: pick(body.company),\n  phone: pick(body.phone),\n  email: pick(body.email),\n  position: pick(body.position),\n  source: pick(body.source || 'Выставка'),\n  comment: pick(body.comment),\n};\n\nif (!lead.name || !lead.company || !lead.phone || !lead.email || !lead.position || !lead.source || !lead.comment) {\n  throw new Error('Missing required lead fields');\n}\n\nreturn [{ json: { lead } }];"
+      },
+      "id": "2",
+      "name": "Validate Required Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 280]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.ZAMMAD_BASE_URL}}/api/v1/tickets",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Token token={{$env.ZAMMAD_API_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"title\": \"Lead: \" + $json.lead.company + \" / \" + $json.lead.name,\n  \"group\": $env.ZAMMAD_GROUP || \"managers\",\n  \"customer\": $json.lead.email || $env.ZAMMAD_FALLBACK_CUSTOMER_EMAIL,\n  \"article\": {\n    \"subject\": \"Новый лид с выставки\",\n    \"body\": \"Имя: \" + $json.lead.name + \\\"\\nКомпания: \\\" + $json.lead.company + \\\"\\nТелефон: \\\" + $json.lead.phone + \\\"\\nEmail: \\\" + $json.lead.email + \\\"\\nДолжность: \\\" + $json.lead.position + \\\"\\nИсточник: \\\" + $json.lead.source + \\\"\\nКомментарий: \\\" + $json.lead.comment,\n    \"type\": \"note\",\n    \"internal\": false\n  }\n}"
+      },
+      "id": "3",
+      "name": "Create Zammad Ticket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [760, 280]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"ok\": true, \"ticket\": $json.id || null}"
+      },
+      "id": "4",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1020, 280]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 400,
+        "responseBody": "={\"ok\": false, \"error\": \"Invalid payload or upstream failure\"}"
+      },
+      "id": "5",
+      "name": "Respond Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [760, 420]
+    }
+  ],
+  "connections": {
+    "Webhook Lead Intake": {
+      "main": [
+        [
+          {
+            "node": "Validate Required Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Required Fields": {
+      "main": [
+        [
+          {
+            "node": "Create Zammad Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Zammad Ticket": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": true,
+  "versionId": "1"
+}

@@ -1,0 +1,20 @@
+{$DOMAIN} {
+  encode zstd gzip
+
+  handle /healthz {
+    respond "ok" 200
+  }
+
+  handle_path /n8n/* {
+    reverse_proxy n8n:5678
+  }
+
+  handle /webhook/* {
+    reverse_proxy processor:8000
+  }
+
+  handle {
+    root * /srv/web
+    file_server
+  }
+}

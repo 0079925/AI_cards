@@ -1,0 +1,88 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  n8n:
+    image: n8nio/n8n:1.89.2
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      TZ: ${TIMEZONE}
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      N8N_HOST: ${DOMAIN}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      N8N_PATH: /n8n/
+      WEBHOOK_URL: http://${DOMAIN}/
+      N8N_EDITOR_BASE_URL: http://${DOMAIN}/n8n/
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      GENERIC_TIMEZONE: ${TIMEZONE}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL}
+      OPENAI_STT_MODEL: ${OPENAI_STT_MODEL}
+      ZAMMAD_BASE_URL: ${ZAMMAD_BASE_URL}
+      ZAMMAD_API_TOKEN: ${ZAMMAD_API_TOKEN}
+      ZAMMAD_GROUP: ${ZAMMAD_GROUP}
+      ZAMMAD_FALLBACK_CUSTOMER_EMAIL: ${ZAMMAD_FALLBACK_CUSTOMER_EMAIL}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workflows:/workflows:ro
+
+  processor:
+    build: ./processor
+    restart: unless-stopped
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL}
+      ZAMMAD_BASE_URL: ${ZAMMAD_BASE_URL}
+      ZAMMAD_API_TOKEN: ${ZAMMAD_API_TOKEN}
+      ZAMMAD_GROUP: ${ZAMMAD_GROUP}
+      ZAMMAD_FALLBACK_CUSTOMER_EMAIL: ${ZAMMAD_FALLBACK_CUSTOMER_EMAIL}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET}
+
+  caddy:
+    image: caddy:2.8.4-alpine
+    restart: unless-stopped
+    depends_on:
+      - n8n
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./web:/srv/web:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  postgres_data:
+  n8n_data:
+  caddy_data:
+  caddy_config:
