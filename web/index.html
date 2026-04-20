@@ -35,6 +35,8 @@ body{display:flex;flex-direction:column;align-items:center;justify-content:cente
 #preview .send-row button{flex:1;padding:14px;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer}
 #sendBtn{background:#0d9488;color:#fff}
 #cancelBtn{background:#333;color:#aaa}
+#attachVoiceBtn{background:#9a3412;color:#fff}
+#voiceAttachState{padding:8px 12px;background:#141414;color:#c8c8c8;font-size:13px}
 </style>
 </head>
 <body>
@@ -56,7 +58,9 @@ body{display:flex;flex-direction:column;align-items:center;justify-content:cente
 </div>
 <div id="preview">
   <img id="previewImg" src="" alt="">
+  <div id="voiceAttachState">Голос не прикреплен</div>
   <div class="send-row">
+    <button id="attachVoiceBtn">&#127897;&#65039; Голос</button>
     <button id="sendBtn">&#10003; Отправить</button>
     <button id="cancelBtn">&#215; Отмена</button>
   </div>
@@ -67,12 +71,13 @@ body{display:flex;flex-direction:column;align-items:center;justify-content:cente
 const cardBtn=document.getElementById('cardBtn'),voiceBtn=document.getElementById('voiceBtn'),
   cardFile=document.getElementById('cardFile'),recBar=document.getElementById('recBar'),
   voiceFile=document.getElementById('voiceFile'),
+  attachVoiceBtn=document.getElementById('attachVoiceBtn'),voiceAttachState=document.getElementById('voiceAttachState'),
   recTime=document.getElementById('recTime'),stopBtn=document.getElementById('stopBtn'),
   preview=document.getElementById('preview'),previewImg=document.getElementById('previewImg'),
   sendBtn=document.getElementById('sendBtn'),cancelBtn=document.getElementById('cancelBtn'),
   overlay=document.getElementById('overlay'),overlayTxt=document.getElementById('overlayText'),
   toast=document.getElementById('toast');
-let mediaRec=null,audioChunks=[],recInterval=null,recSecs=0,cardFileData=null;
+let mediaRec=null,audioChunks=[],recInterval=null,recSecs=0,cardFileData=null,cardVoiceData=null,recMode='standalone',voicePickMode='standalone';
 function showOverlay(m){overlayTxt.textContent=m;overlay.classList.add('show')}
 function hideOverlay(){overlay.classList.remove('show')}
 function showToast(m,err=false){toast.textContent=m;toast.className='show'+(err?' err':'');setTimeout(()=>toast.className='',4500)}
@@ -85,28 +90,50 @@ async function postFile(url,file,extra={}){
 }
 function hideBtns(){cardBtn.style.display='none';voiceBtn.style.display='none'}
 function showBtns(){cardBtn.style.display='';voiceBtn.style.display=''}
+function updateCardVoiceState(){
+  voiceAttachState.textContent=cardVoiceData?('Голос прикреплен: '+(cardVoiceData.name||'voice')):'Голос не прикреплен';
+}
 cardBtn.addEventListener('click',()=>cardFile.click());
 cardFile.addEventListener('change',()=>{
   const f=cardFile.files[0];if(!f)return;
-  cardFileData=f;previewImg.src=URL.createObjectURL(f);
+  cardFileData=f;cardVoiceData=null;updateCardVoiceState();previewImg.src=URL.createObjectURL(f);
   preview.style.display='block';hideBtns();
 });
 sendBtn.addEventListener('click',async()=>{
   if(!cardFileData)return;preview.style.display='none';
-  showOverlay('Распознаю визитку...');
+  showOverlay(cardVoiceData?'Распознаю визитку и голос...':'Распознаю визитку...');
   try{
-    const data=await postFile('/webhook/card',cardFileData);
+    const fd=new FormData();
+    fd.append('file',cardFileData);
+    if(cardVoiceData)fd.append('voice_file',cardVoiceData);
+    const r=await fetch('/webhook/card',{method:'POST',body:fd});
+    if(!r.ok)throw new Error('HTTP '+r.status+' — '+await r.text().catch(()=>'"));
+    const data=await r.json();
     hideOverlay();const t=data.lead||{};
-    showToast('Тикет #'+data.ticket_id+'\n'+(t.name||'')+(t.company?' · '+t.company:''));
+    showToast('Тикет #'+data.ticket_id+'\n'+(t.name||'')+(t.company?' · '+t.company:'')+(data.voice_attached?'\n+ голос':''));
   }catch(e){hideOverlay();showToast('Ошибка: '+e.message,true)}
-  finally{cardFileData=null;cardFile.value='';showBtns()}
+  finally{cardFileData=null;cardVoiceData=null;updateCardVoiceState();cardFile.value='';showBtns()}
 });
-cancelBtn.addEventListener('click',()=>{preview.style.display='none';cardFileData=null;cardFile.value='';showBtns()});
+cancelBtn.addEventListener('click',()=>{preview.style.display='none';cardFileData=null;cardVoiceData=null;updateCardVoiceState();cardFile.value='';showBtns()});
 voiceBtn.addEventListener('click',startRec);
 stopBtn.addEventListener('click',stopRec);
+attachVoiceBtn.addEventListener('click',async()=>{
+  if(!cardFileData){showToast('Сначала выбери визитку',true);return}
+  recMode='card';
+  stopBtn.textContent='⏹ СТОП — прикрепить';
+  if(!canRecordInBrowser()){
+    voicePickMode='card';
+    return submitVoiceFileFallback();
+  }
+  await startRec();
+});
 voiceFile.addEventListener('change',async()=>{
   const f=voiceFile.files[0];
   if(!f)return;
+  if(voicePickMode==='card'){
+    cardVoiceData=f;updateCardVoiceState();voiceFile.value='';voicePickMode='standalone';showToast('Голос прикреплен к визитке');
+    return;
+  }
   showOverlay('Распознаю речь...');
   try{
     const data=await postFile('/webhook/voice',f);
@@ -133,7 +160,9 @@ async function submitVoiceFileFallback(){
 }
 
 async function startRec(){
+  if(recMode!=='card')recMode='standalone';
   if(!canRecordInBrowser()){
+    voicePickMode=recMode==='card'?'card':'standalone';
     return submitVoiceFileFallback();
   }
   try{
@@ -143,7 +172,7 @@ async function startRec(){
     const mime=['audio/webm','audio/ogg','audio/mp4'].find(m=>MediaRecorder.isTypeSupported(m))||'';
     mediaRec=new MediaRecorder(stream,mime?{mimeType:mime}:{});
     mediaRec.ondataavailable=e=>{if(e.data.size>0)audioChunks.push(e.data)};
-    mediaRec.start(100);hideBtns();recBar.classList.add('show');
+    mediaRec.start(100);if(recMode!=='card')hideBtns();recBar.classList.add('show');
   }catch(e){showToast('Нет доступа к микрофону: '+(e?.message||e),true)}
 }
 function updateTimer(){const m=Math.floor(recSecs/60),s=recSecs%60;recTime.textContent=m+':'+(s<10?'0':'')+s}
@@ -151,11 +180,16 @@ async function stopRec(){
   if(!mediaRec)return;clearInterval(recInterval);
   mediaRec.stop();mediaRec.stream.getTracks().forEach(t=>t.stop());
   mediaRec.onstop=async()=>{
-    recBar.classList.remove('show');showBtns();
+    recBar.classList.remove('show');
     const mime=audioChunks[0]?.type||'audio/webm';
     const ext=mime.includes('ogg')?'ogg':mime.includes('mp4')?'mp4':'webm';
     const blob=new Blob(audioChunks,{type:mime});
     const file=new File([blob],'voice.'+ext,{type:mime});
+    if(recMode==='card'){
+      cardVoiceData=file;updateCardVoiceState();stopBtn.textContent='⏹ СТОП — отправить';recMode='standalone';showToast('Голос прикреплен к визитке');
+      return;
+    }
+    showBtns();
     showOverlay('Распознаю речь...');
     try{
       const data=await postFile('/webhook/voice',file);

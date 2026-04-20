@@ -66,6 +66,14 @@ def guess_mime(filename: str, fallback: str) -> str:
     return fallback
 
 
+def merge_lead_data(primary: dict, secondary: dict) -> dict:
+    merged = dict(primary)
+    for key in ["name", "company", "phone", "email", "position"]:
+        if not (merged.get(key) or "").strip() and (secondary.get(key) or "").strip():
+            merged[key] = secondary.get(key)
+    return merged
+
+
 async def zammad_ticket(
     lead: dict,
     attachment_name: str = "",
@@ -300,17 +308,50 @@ def health():
 async def card_intake(
     file: UploadFile = File(...),
     comment: str = Form(""),
+    voice_file: UploadFile | None = File(default=None),
 ):
     data = await file.read()
     mime = file.content_type or "image/jpeg"
-    lead, ticket_id = await create_ticket_from_card(
+    lead, _ = await create_ticket_from_card(
         data=data,
         mime=mime,
         source="Выставка / визитка",
         comment=comment,
-        notify=True,
+        notify=False,
     )
-    return {"ok": True, "ticket_id": ticket_id, "lead": lead}
+
+    voice_data = b""
+    voice_name = ""
+    voice_mime = ""
+    voice_transcript = ""
+    if voice_file is not None:
+        voice_data = await voice_file.read()
+        if voice_data:
+            voice_name = voice_file.filename or "voice.webm"
+            voice_mime = voice_file.content_type or guess_mime(voice_name, "audio/webm")
+            voice_lead, voice_transcript = await extract_voice_lead(voice_data, voice_name, voice_mime)
+            lead = merge_lead_data(lead, voice_lead)
+            lead["source"] = "Выставка / визитка + голос"
+            transcript_comment = f"Голос (транскрипция): {voice_transcript}"
+            existing_comment = (lead.get("comment") or "").strip()
+            lead["comment"] = f"{existing_comment}\n{transcript_comment}" if existing_comment else transcript_comment
+
+    ticket = await zammad_ticket(
+        lead,
+        attachment_name=voice_name,
+        attachment_mime=voice_mime,
+        attachment_data=voice_data or None,
+    )
+    ticket_id = ticket.get("id")
+    await send_telegram_notice(ticket_id, lead, lead.get("source") or "визитка")
+
+    return {
+        "ok": True,
+        "ticket_id": ticket_id,
+        "lead": lead,
+        "voice_attached": bool(voice_data),
+        "voice_transcript": voice_transcript,
+    }
 
 
 @app.post("/webhook/voice")
