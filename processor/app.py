@@ -1,4 +1,4 @@
-import base64, json, logging, os, re
+import base64, json, logging, os, re, time
 import httpx
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
@@ -18,6 +18,9 @@ MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+TELEGRAM_COMBINE_WINDOW_SEC = int(os.getenv("TELEGRAM_COMBINE_WINDOW_SEC", "600") or "600")
+
+telegram_pending_cards: dict[str, dict] = {}
 
 EXTRACT_SYSTEM = """Ты — ассистент менеджера по продажам на выставке.
 Извлеки из текста данные лида. Верни ТОЛЬКО JSON без markdown:
@@ -72,6 +75,32 @@ def merge_lead_data(primary: dict, secondary: dict) -> dict:
         if not (merged.get(key) or "").strip() and (secondary.get(key) or "").strip():
             merged[key] = secondary.get(key)
     return merged
+
+
+def append_comment(lead: dict, text: str) -> None:
+    base = (lead.get("comment") or "").strip()
+    lead["comment"] = f"{base}\n{text}" if base else text
+
+
+def cleanup_pending_cards() -> None:
+    now = time.time()
+    stale = [cid for cid, state in telegram_pending_cards.items() if now - state.get("ts", 0) > TELEGRAM_COMBINE_WINDOW_SEC]
+    for cid in stale:
+        telegram_pending_cards.pop(cid, None)
+
+
+async def build_card_lead(data: bytes, mime: str, source: str, comment: str = "") -> dict:
+    log.info("card: %s bytes, type=%s", len(data), mime)
+    lead = await extract_card_lead(data, mime)
+    lead.setdefault("source", source)
+    if comment:
+        append_comment(lead, comment)
+    log.info("card lead: %s", lead)
+    return lead
+
+
+def pending_minutes() -> int:
+    return max(1, TELEGRAM_COMBINE_WINDOW_SEC // 60)
 
 
 async def zammad_ticket(
@@ -177,12 +206,7 @@ async def extract_voice_lead(data: bytes, fname: str, mime: str) -> tuple[dict, 
 
 
 async def create_ticket_from_card(data: bytes, mime: str, source: str, comment: str = "", notify: bool = True) -> tuple[dict, int | None]:
-    log.info("card: %s bytes, type=%s", len(data), mime)
-    lead = await extract_card_lead(data, mime)
-    lead.setdefault("source", source)
-    if comment:
-        lead["comment"] = comment
-    log.info("card lead: %s", lead)
+    lead = await build_card_lead(data, mime, source, comment)
 
     ticket = await zammad_ticket(lead)
     ticket_id = ticket.get("id")
@@ -332,9 +356,7 @@ async def card_intake(
             voice_lead, voice_transcript = await extract_voice_lead(voice_data, voice_name, voice_mime)
             lead = merge_lead_data(lead, voice_lead)
             lead["source"] = "Выставка / визитка + голос"
-            transcript_comment = f"Голос (транскрипция): {voice_transcript}"
-            existing_comment = (lead.get("comment") or "").strip()
-            lead["comment"] = f"{existing_comment}\n{transcript_comment}" if existing_comment else transcript_comment
+            append_comment(lead, f"Голос (транскрипция): {voice_transcript}")
 
     ticket = await zammad_ticket(
         lead,
@@ -392,11 +414,38 @@ async def telegram_intake(request: Request):
     if not chat_id:
         return {"ok": True}
 
+    cleanup_pending_cards()
+
     text = (msg.get("text") or "").strip()
     if text.startswith("/start"):
         await telegram_send_message(
             chat_id,
-            "Привет. Отправь фото визитки или голосовое сообщение. Я распознаю данные и создам тикет в Zammad.",
+            "Привет. Отправь фото визитки, потом голос — и я соберу это в один тикет. "
+            f"После фото у тебя есть {pending_minutes()} мин. Также есть команды /done и /cancel.",
+        )
+        return {"ok": True}
+
+    if text.startswith("/cancel"):
+        if telegram_pending_cards.pop(chat_id, None):
+            await telegram_send_message(chat_id, "Черновик визитки сброшен.")
+        else:
+            await telegram_send_message(chat_id, "Активного черновика нет.")
+        return {"ok": True}
+
+    if text.startswith("/done"):
+        state = telegram_pending_cards.pop(chat_id, None)
+        if not state:
+            await telegram_send_message(chat_id, "Нет активной визитки. Сначала отправь фото.")
+            return {"ok": True}
+
+        lead = state.get("lead") or {}
+        lead["source"] = "Telegram / визитка"
+        ticket = await zammad_ticket(lead)
+        ticket_id = ticket.get("id")
+        await telegram_send_message(
+            chat_id,
+            f"Готово. Создан тикет #{ticket_id} (без голоса).\n"
+            f"{lead.get('name') or '-'} | {lead.get('company') or '-'} | {lead.get('phone') or '-'}",
         )
         return {"ok": True}
 
@@ -409,16 +458,18 @@ async def telegram_intake(request: Request):
                 return {"ok": True}
 
             data, fname, mime = await telegram_download_file(file_id, "card.jpg", "image/jpeg")
-            lead, ticket_id = await create_ticket_from_card(
+            lead = await build_card_lead(
                 data=data,
                 mime=mime,
                 source="Telegram / визитка",
                 comment=f"Telegram chat: {chat_id}",
-                notify=False,
             )
+            telegram_pending_cards[chat_id] = {"lead": lead, "ts": time.time()}
             await telegram_send_message(
                 chat_id,
-                f"Готово. Создан тикет #{ticket_id}.\n"
+                "Визитка принята. Теперь пришли голосовое сообщение, и я добавлю его в этот же тикет.\n"
+                f"Окно ожидания: {pending_minutes()} мин.\n"
+                "Если голос не нужен, отправь /done. Для сброса /cancel.\n"
                 f"{lead.get('name') or '-'} | {lead.get('company') or '-'} | {lead.get('phone') or '-'}",
             )
             return {"ok": True}
@@ -431,6 +482,28 @@ async def telegram_intake(request: Request):
                 return {"ok": True}
 
             data, fname, mime = await telegram_download_file(file_id, "voice.ogg", "audio/ogg")
+
+            state = telegram_pending_cards.pop(chat_id, None)
+            if state:
+                card_lead = state.get("lead") or {}
+                voice_lead, transcript = await extract_voice_lead(data, fname, mime)
+                lead = merge_lead_data(card_lead, voice_lead)
+                lead["source"] = "Telegram / визитка + голос"
+                append_comment(lead, f"Голос (транскрипция): {transcript}")
+                ticket = await zammad_ticket(
+                    lead,
+                    attachment_name=fname,
+                    attachment_mime=mime,
+                    attachment_data=data,
+                )
+                ticket_id = ticket.get("id")
+                await telegram_send_message(
+                    chat_id,
+                    f"Готово. Создан один тикет #{ticket_id} (визитка + голос).\n"
+                    f"{lead.get('name') or '-'} | {lead.get('company') or '-'} | {lead.get('phone') or '-'}",
+                )
+                return {"ok": True}
+
             lead, ticket_id, _ = await create_ticket_from_voice(
                 data=data,
                 fname=fname,
